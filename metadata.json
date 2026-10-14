@@ -1,0 +1,6 @@
+{
+  "name": "WiFi CamShare - Wireless Camera Streaming",
+  "description": "Stream and share your phone or computer front and back camera in real-time over WiFi with instant share links and QR code viewing.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

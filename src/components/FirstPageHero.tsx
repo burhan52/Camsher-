@@ -342,26 +342,31 @@ export const FirstPageHero: React.FC<FirstPageHeroProps> = ({
       </div>
 
       {/* Feature & Security Badges */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-        <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-center">
+        <div className="p-3.5 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
           <Zap className="w-5 h-5 text-amber-400" />
           <span className="text-xs font-semibold text-slate-200">Ultra-Low Latency</span>
           <span className="text-[11px] text-slate-400">Direct WebRTC & WebSocket relay</span>
         </div>
-        <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
-          <ShieldCheck className="w-5 h-5 text-emerald-400" />
-          <span className="text-xs font-semibold text-slate-200">Private & Local</span>
-          <span className="text-[11px] text-slate-400">Encrypted in-transit over WiFi</span>
+        <div className="p-3.5 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
+          <Sparkles className="w-5 h-5 text-amber-300" />
+          <span className="text-xs font-semibold text-slate-200">Low Light Mode</span>
+          <span className="text-[11px] text-slate-400">Auto EV & ISO exposure boost</span>
         </div>
-        <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
+        <div className="p-3.5 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
           <Smartphone className="w-5 h-5 text-cyan-400" />
           <span className="text-xs font-semibold text-slate-200">Front & Back Switch</span>
           <span className="text-[11px] text-slate-400">Toggle lens anytime smoothly</span>
         </div>
-        <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
+        <div className="p-3.5 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5">
           <Layers className="w-5 h-5 text-purple-400" />
-          <span className="text-xs font-semibold text-slate-200">Cross-Platform</span>
-          <span className="text-[11px] text-slate-400">iOS, Android, Mac, Windows, Linux</span>
+          <span className="text-xs font-semibold text-slate-200">Full & Small Screen</span>
+          <span className="text-[11px] text-slate-400">Full view, mini player, and PiP</span>
+        </div>
+        <div className="p-3.5 rounded-2xl bg-slate-900/40 border border-slate-800/80 flex flex-col items-center gap-1.5 col-span-2 md:col-span-1">
+          <ShieldCheck className="w-5 h-5 text-emerald-400" />
+          <span className="text-xs font-semibold text-slate-200">Private & Local</span>
+          <span className="text-[11px] text-slate-400">Encrypted in-transit over WiFi</span>
         </div>
       </div>
     </div>

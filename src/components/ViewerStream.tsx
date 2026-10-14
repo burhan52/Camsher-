@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Video,
   Volume2,
@@ -21,6 +21,10 @@ import {
   Camera,
   PictureInPicture2,
   ChevronLeft,
+  Sparkles,
+  Shrink,
+  Expand,
+  Sliders,
 } from 'lucide-react';
 import { CameraFacing } from '../types';
 import { ViewerPeerManager } from '../utils/webrtc';
@@ -38,9 +42,15 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
   const [hasBroadcaster, setHasBroadcaster] = useState<boolean>(false);
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>('environment');
   const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
+  const [isLowLight, setIsLowLight] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(true);
   const [volume, setVolume] = useState<number>(1);
+
+  // Screen sizing mode: standard, fullscreen, or small screen (compact mini-player)
+  const [viewMode, setViewMode] = useState<'standard' | 'fullscreen' | 'small'>('standard');
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  // Zoom and filter
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [videoFilter, setVideoFilter] = useState<'normal' | 'night' | 'bw' | 'vivid'>('normal');
 
@@ -62,6 +72,21 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const frameCountRef = useRef<number>(0);
   const lastFpsCalcRef = useRef<number>(performance.now());
+
+  // Listen to fullscreenchange event
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isNowFullscreen = !!document.fullscreenElement;
+      setIsFullscreen(isNowFullscreen);
+      if (!isNowFullscreen && viewMode === 'fullscreen') {
+        setViewMode('standard');
+      }
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, [viewMode]);
 
   // Initialize Viewer connection
   useEffect(() => {
@@ -115,12 +140,12 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
           setHasBroadcaster(msg.hasBroadcaster);
           if (msg.cameraFacing) setCameraFacing(msg.cameraFacing);
           if (typeof msg.isTorchOn === 'boolean') setIsTorchOn(msg.isTorchOn);
+          if (typeof msg.isLowLight === 'boolean') setIsLowLight(msg.isLowLight);
           setConnectionStatus(msg.hasBroadcaster ? 'connected' : 'connecting');
         } else if (msg.type === 'broadcaster-joined') {
           setHasBroadcaster(true);
           setConnectionStatus('connected');
           if (msg.cameraFacing) setCameraFacing(msg.cameraFacing);
-          // Broadcaster will send an offer via WebRTC shortly
         } else if (msg.type === 'broadcaster-disconnected') {
           setHasBroadcaster(false);
           setConnectionStatus('disconnected');
@@ -130,12 +155,13 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
         } else if (msg.type === 'signal') {
           peerManager.handleSignal(msg.signalData);
         } else if (msg.type === 'video-frame') {
-          // If native WebRTC video isn't rendering or is delayed, render fallback frame
+          // If native WebRTC video isn't active, render fallback frame
           if (!remoteStreamRef.current || videoRef.current?.paused) {
             setUsingFallbackStream(true);
             setHasBroadcaster(true);
             setConnectionStatus('connected');
             if (msg.facing) setCameraFacing(msg.facing);
+            if (typeof msg.isLowLight === 'boolean') setIsLowLight(msg.isLowLight);
 
             const canvas = canvasRef.current;
             if (canvas && msg.frame) {
@@ -150,7 +176,6 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
             }
           }
 
-          // Compute latency and FPS
           if (msg.timestamp) {
             const currentLatency = Math.max(8, Date.now() - msg.timestamp);
             setLatencyMs(currentLatency);
@@ -165,6 +190,7 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
         } else if (msg.type === 'camera-state-update') {
           if (msg.cameraFacing) setCameraFacing(msg.cameraFacing);
           if (typeof msg.isTorchOn === 'boolean') setIsTorchOn(msg.isTorchOn);
+          if (typeof msg.isLowLight === 'boolean') setIsLowLight(msg.isLowLight);
         }
       } catch (err) {
         console.error('Failed to parse viewer WS message', err);
@@ -196,6 +222,19 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
     }
   };
 
+  // Request broadcaster to toggle Low Light mode
+  const requestLowLightToggle = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'viewer-command',
+          roomId,
+          command: 'toggle-low-light',
+        })
+      );
+    }
+  };
+
   // Request broadcaster to toggle torch
   const requestTorchToggle = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -207,6 +246,29 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
         })
       );
     }
+  };
+
+  // Full Screen Toggle
+  const toggleFullScreen = () => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().catch(() => {});
+      setIsFullscreen(true);
+      setViewMode('fullscreen');
+    } else {
+      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
+      setViewMode('standard');
+    }
+  };
+
+  // Small Screen Toggle (Switch between Small Screen mode and Standard mode)
+  const toggleSmallScreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
+    }
+    setViewMode((prev) => (prev === 'small' ? 'standard' : 'small'));
   };
 
   // Audio unmute / mute
@@ -223,7 +285,7 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
 
   // Snapshot Capture from Viewer
   const takeSnapshot = () => {
-    let snapCanvas = document.createElement('canvas');
+    const snapCanvas = document.createElement('canvas');
     if (usingFallbackStream && canvasRef.current) {
       snapCanvas.width = canvasRef.current.width || 1280;
       snapCanvas.height = canvasRef.current.height || 720;
@@ -307,18 +369,6 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
     }
   };
 
-  // Fullscreen
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
-    }
-  };
-
   // Zoom controls
   const handleZoom = (direction: 'in' | 'out') => {
     setZoomLevel((prev) => {
@@ -331,7 +381,7 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
   const getFilterClass = () => {
     switch (videoFilter) {
       case 'night':
-        return 'brightness-125 contrast-125 saturate-150';
+        return 'brightness-135 contrast-125 saturate-150';
       case 'bw':
         return 'grayscale contrast-125';
       case 'vivid':
@@ -344,8 +394,12 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
   return (
     <div
       ref={containerRef}
-      className={`relative w-full max-w-6xl mx-auto flex flex-col bg-slate-950 text-slate-100 ${
-        isFullscreen ? 'h-screen p-0' : 'p-3 md:p-6 space-y-4'
+      className={`relative w-full mx-auto flex flex-col bg-slate-950 text-slate-100 transition-all duration-300 ${
+        isFullscreen
+          ? 'h-screen p-0 max-w-none'
+          : viewMode === 'small'
+          ? 'max-w-md p-3 space-y-3'
+          : 'max-w-6xl p-3 md:p-6 space-y-4'
       }`}
     >
       {/* Top Header */}
@@ -368,7 +422,7 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
               }`}
             />
             <span className="text-xs font-bold text-slate-200">
-              {hasBroadcaster ? 'LIVE CAMERA FEED' : 'WAITING FOR BROADCASTER'}
+              {hasBroadcaster ? 'LIVE CAMERA FEED' : 'CONNECTING TO CAMERA...'}
             </span>
           </div>
 
@@ -377,21 +431,53 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
           </span>
         </div>
 
-        {/* Stats & Network Status */}
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700 text-xs text-slate-300 font-mono">
-            <Wifi className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{latencyMs}ms</span>
-          </div>
+        {/* View Size Mode Pills (Small Screen / Standard / Full Screen) */}
+        <div className="flex items-center gap-2">
+          {/* Low Light Badge */}
+          {isLowLight && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-semibold animate-pulse">
+              <Moon className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Low Light Mode</span>
+            </div>
+          )}
 
-          <div className="px-2.5 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700 text-xs font-semibold text-slate-200 uppercase">
-            {cameraFacing === 'user' ? 'Front Camera' : 'Back Camera'}
+          {/* Quick Screen Sizing Controls */}
+          <div className="flex items-center bg-slate-800/90 p-1 rounded-xl border border-slate-700">
+            <button
+              onClick={toggleSmallScreen}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                viewMode === 'small'
+                  ? 'bg-cyan-500 text-white shadow'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+              title="Small Screen / Compact Mini View"
+            >
+              <Shrink className="w-3.5 h-3.5" />
+              <span>Small Screen</span>
+            </button>
+
+            <button
+              onClick={toggleFullScreen}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                isFullscreen
+                  ? 'bg-cyan-500 text-white shadow'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+              title="Full Screen Video"
+            >
+              <Expand className="w-3.5 h-3.5" />
+              <span>Full Screen</span>
+            </button>
           </div>
         </div>
       </div>
 
       {/* Main Video Receiver Screen */}
-      <div className="relative w-full aspect-video bg-black rounded-3xl overflow-hidden border border-slate-800 shadow-2xl flex items-center justify-center">
+      <div
+        className={`relative w-full aspect-video bg-black rounded-3xl overflow-hidden border border-slate-800 shadow-2xl flex items-center justify-center transition-all ${
+          viewMode === 'small' ? 'max-h-64' : ''
+        }`}
+      >
         {/* Native WebRTC Video Element */}
         <video
           ref={videoRef}
@@ -475,15 +561,33 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
 
         {/* Viewer Control Bar */}
         <div className="absolute bottom-4 inset-x-4 z-20 flex items-center justify-between gap-2 p-2.5 bg-slate-950/85 backdrop-blur-lg border border-slate-800/80 rounded-2xl">
-          {/* Left: Remote Camera Switch & Remote Torch */}
-          <div className="flex items-center gap-2">
+          {/* Left: Remote Camera Switch, Low Light & Torch */}
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <button
               onClick={requestCameraSwitch}
-              title="Request Broadcaster to Switch Camera"
+              title="Request Broadcaster to Switch Camera (Front/Back)"
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition cursor-pointer"
             >
               <FlipHorizontal className="w-4 h-4 text-cyan-400" />
-              <span className="hidden sm:inline">Flip Camera</span>
+              <span className="hidden md:inline">Flip Camera</span>
+            </button>
+
+            {/* Remote Low Light Mode Toggle */}
+            <button
+              onClick={requestLowLightToggle}
+              title={
+                isLowLight
+                  ? 'Request Broadcaster Disable Low Light'
+                  : 'Request Broadcaster Enable Low Light (Boost EV & ISO)'
+              }
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                isLowLight
+                  ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+              }`}
+            >
+              <Moon className="w-4 h-4 text-amber-400" />
+              <span className="hidden md:inline">Low Light</span>
             </button>
 
             <button
@@ -537,7 +641,7 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
             </button>
           </div>
 
-          {/* Right: Zoom, Filter, PiP & Fullscreen */}
+          {/* Right: Small Screen Toggle, Zoom, PiP, Fullscreen */}
           <div className="flex items-center gap-1.5">
             <div className="hidden md:flex items-center bg-slate-800 rounded-xl border border-slate-700 p-0.5">
               <button
@@ -581,15 +685,31 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
             <button
               onClick={togglePiP}
               className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer hidden sm:block"
-              title="Picture in Picture"
+              title="Picture in Picture Floating Window"
             >
               <PictureInPicture2 className="w-4 h-4" />
             </button>
 
             <button
-              onClick={toggleFullscreen}
-              className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer"
-              title="Fullscreen"
+              onClick={toggleSmallScreen}
+              className={`p-2 rounded-xl border transition cursor-pointer ${
+                viewMode === 'small'
+                  ? 'bg-cyan-500 text-white border-cyan-400'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+              }`}
+              title={viewMode === 'small' ? 'Standard Screen' : 'Small Screen / Compact View'}
+            >
+              <Shrink className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={toggleFullScreen}
+              className={`p-2 rounded-xl border transition cursor-pointer ${
+                isFullscreen
+                  ? 'bg-cyan-500 text-white border-cyan-400'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+              }`}
+              title={isFullscreen ? 'Exit Full Screen' : 'Full Screen'}
             >
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </button>
@@ -603,20 +723,20 @@ export const ViewerStream: React.FC<ViewerStreamProps> = ({ roomId, onBackToHome
           <Wifi className="w-5 h-5 text-emerald-400 shrink-0" />
           <div>
             <div className="font-semibold text-white">Direct WiFi Stream</div>
-            <div className="text-slate-400 text-[11px]">Real-time video & audio streaming</div>
+            <div className="text-slate-400 text-[11px]">Real-time video & audio streaming ({latencyMs}ms)</div>
           </div>
         </div>
 
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center gap-3">
-          <FlipHorizontal className="w-5 h-5 text-cyan-400 shrink-0" />
+          <Moon className="w-5 h-5 text-amber-400 shrink-0" />
           <div>
-            <div className="font-semibold text-white">Remote Lens Control</div>
-            <div className="text-slate-400 text-[11px]">Tap 'Flip Camera' to swap broadcaster lens</div>
+            <div className="font-semibold text-white">Low Light Vision</div>
+            <div className="text-slate-400 text-[11px]">Auto exposure & ISO boost for dark rooms</div>
           </div>
         </div>
 
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center gap-3">
-          <Download className="w-5 h-5 text-amber-400 shrink-0" />
+          <Download className="w-5 h-5 text-cyan-400 shrink-0" />
           <div>
             <div className="font-semibold text-white">Local Snapshot & Clips</div>
             <div className="text-slate-400 text-[11px]">Capture photos or record video anytime</div>

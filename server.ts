@@ -175,12 +175,6 @@ wss.on('connection', (ws: WebSocket) => {
           }
           break;
         }
-                viewerWs.send(updateMsg);
-              }
-            }
-          }
-          break;
-        }
 
         case 'viewer-command': {
           // Viewer requesting switch-camera or toggle-torch or snap

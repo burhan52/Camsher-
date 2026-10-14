@@ -22,6 +22,11 @@ import {
   AlertCircle,
   Eye,
   Settings,
+  Moon,
+  Sun,
+  Sparkles,
+  RefreshCw,
+  Volume2,
 } from 'lucide-react';
 import { CameraFacing, StreamQuality, QUALITY_PRESETS } from '../types';
 import { BroadcasterPeerManager } from '../utils/webrtc';
@@ -59,6 +64,21 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   const [isMuted, setIsMuted] = useState<boolean>(!enableAudio);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [selectedQuality, setSelectedQuality] = useState<StreamQuality>(quality);
+
+  // Low Light Mode (Exposure & ISO adjustments)
+  const [isLowLight, setIsLowLight] = useState<boolean>(false);
+  const [exposureCapabilities, setExposureCapabilities] = useState<{
+    hasExposureCompensation: boolean;
+    hasIso: boolean;
+  }>({ hasExposureCompensation: false, hasIso: false });
+
+  // Camera Errors & Recovery
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  // Audio Level Meter
+  const [audioLevel, setAudioLevel] = useState<number>(0);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioAnalyserRef = useRef<AnalyserNode | null>(null);
 
   // Stats & Network State
   const [viewersCount, setViewersCount] = useState<number>(0);
@@ -98,12 +118,116 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     };
   }, []);
 
+  // Setup Audio Meter
+  const setupAudioMeter = (audioStream: MediaStream) => {
+    try {
+      const audioTrack = audioStream.getAudioTracks()[0];
+      if (!audioTrack) return;
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      audioContextRef.current = ctx;
+
+      const source = ctx.createMediaStreamSource(audioStream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+      audioAnalyserRef.current = analyser;
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const checkVolume = () => {
+        if (!audioAnalyserRef.current) return;
+        audioAnalyserRef.current.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const avg = sum / dataArray.length;
+        setAudioLevel(Math.min(100, Math.round((avg / 128) * 100)));
+        requestAnimationFrame(checkVolume);
+      };
+      checkVolume();
+    } catch {
+      // Audio meter fallback
+    }
+  };
+
+  // Hardware Exposure / ISO / Low Light Controller
+  const applyLowLightSettings = useCallback(
+    async (enable: boolean, targetStream?: MediaStream) => {
+      const activeStream = targetStream || stream;
+      if (!activeStream) return;
+      const track = activeStream.getVideoTracks()[0];
+      if (!track) return;
+
+      try {
+        const capabilities = (track.getCapabilities && track.getCapabilities()) as any;
+        const advanced: any = {};
+
+        if (capabilities?.exposureCompensation) {
+          // Adjust exposure compensation to maximum positive EV in dim lighting
+          advanced.exposureCompensation = enable
+            ? capabilities.exposureCompensation.max
+            : 0;
+        }
+
+        if (capabilities?.iso) {
+          // Boost ISO sensitivity for dim environments
+          advanced.iso = enable
+            ? Math.min(capabilities.iso.max, 1600)
+            : (capabilities.iso.min || 100);
+        }
+
+        if (capabilities?.exposureMode && Array.isArray(capabilities.exposureMode)) {
+          if (capabilities.exposureMode.includes('continuous')) {
+            advanced.exposureMode = 'continuous';
+          }
+        }
+
+        if (Object.keys(advanced).length > 0) {
+          await (track as any).applyConstraints({
+            advanced: [advanced],
+          });
+        }
+      } catch (err) {
+        console.warn('Hardware Low Light adjustment error:', err);
+      }
+
+      setIsLowLight(enable);
+
+      // Broadcast camera state update to server & viewers
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'camera-state-update',
+            roomId,
+            cameraFacing: facing,
+            isTorchOn,
+            isLowLight: enable,
+          })
+        );
+      }
+    },
+    [facing, isTorchOn, roomId, stream]
+  );
+
   // Initialize camera stream
   const startCameraStream = useCallback(
-    async (cameraFacing: CameraFacing, streamQuality: StreamQuality, micEnabled: boolean) => {
+    async (
+      cameraFacing: CameraFacing,
+      streamQuality: StreamQuality,
+      micEnabled: boolean,
+      lowLightActive: boolean = isLowLight
+    ) => {
+      setCameraError(null);
       try {
         if (stream) {
           stream.getTracks().forEach((track) => track.stop());
+        }
+        if (audioContextRef.current) {
+          audioContextRef.current.close().catch(() => {});
+          audioContextRef.current = null;
         }
 
         const constraints: MediaStreamConstraints = {
@@ -124,12 +248,27 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           videoRef.current.play().catch(() => {});
         }
 
-        // Check if torch/flashlight is supported
+        // Setup audio level visualizer
+        if (micEnabled) {
+          setupAudioMeter(newStream);
+        }
+
+        // Check hardware capabilities (Torch, Exposure, ISO)
         const videoTrack = newStream.getVideoTracks()[0];
         if (videoTrack) {
           const capabilities = (videoTrack.getCapabilities && videoTrack.getCapabilities()) as any;
           setIsTorchSupported(!!capabilities?.torch);
           setIsTorchOn(false);
+
+          setExposureCapabilities({
+            hasExposureCompensation: !!capabilities?.exposureCompensation,
+            hasIso: !!capabilities?.iso,
+          });
+
+          // Re-apply low light settings if it was active
+          if (lowLightActive) {
+            applyLowLightSettings(true, newStream);
+          }
         }
 
         // Update WebRTC peer manager
@@ -145,10 +284,11 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
               roomId,
               cameraFacing,
               isTorchOn: false,
+              isLowLight: lowLightActive,
             })
           );
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('Failed to get media stream:', err);
         // Fallback without exact constraints
         try {
@@ -165,12 +305,17 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           if (peerManagerRef.current) {
             peerManagerRef.current.setStream(fallbackStream);
           }
-        } catch (fallbackErr) {
+        } catch (fallbackErr: any) {
           console.error('All camera attempts failed:', fallbackErr);
+          setCameraError(
+            fallbackErr?.name === 'NotAllowedError'
+              ? 'Camera permission denied. Please allow camera access in your browser address bar and click Retry.'
+              : 'Camera not available. Please make sure no other app is using the camera and click Retry.'
+          );
         }
       }
     },
-    [roomId, stream]
+    [applyLowLightSettings, isLowLight, roomId, stream]
   );
 
   // Initialize WebSocket & WebRTC
@@ -202,6 +347,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           type: 'register-broadcaster',
           roomId,
           cameraFacing: facing,
+          isLowLight,
         })
       );
     };
@@ -220,11 +366,13 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
         } else if (msg.type === 'signal') {
           peerManager.handleSignal(msg.fromId, msg.signalData);
         } else if (msg.type === 'viewer-command') {
-          // Viewer requested a camera switch or torch toggle remotely
+          // Remote commands from connected viewer
           if (msg.command === 'switch-camera') {
             toggleCameraFacing();
           } else if (msg.command === 'toggle-torch') {
             toggleTorch();
+          } else if (msg.command === 'toggle-low-light') {
+            toggleLowLight();
           }
         }
       } catch (e) {
@@ -243,14 +391,17 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       }
       peerManager.destroy();
     };
-  }, [roomId]);
+  }, [facing, isLowLight, roomId]);
 
   // Start camera on mount
   useEffect(() => {
-    startCameraStream(facing, selectedQuality, !isMuted);
+    startCameraStream(facing, selectedQuality, !isMuted, isLowLight);
     return () => {
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
       }
     };
   }, []);
@@ -270,9 +421,17 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
 
       // Draw downscaled frame for lightweight network relay
       const targetWidth = 480;
-      const targetHeight = Math.round((video.videoHeight / (video.videoWidth || 1)) * targetWidth) || 270;
+      const targetHeight =
+        Math.round((video.videoHeight / (video.videoWidth || 1)) * targetWidth) || 270;
       canvas.width = targetWidth;
       canvas.height = targetHeight;
+
+      // Apply Low Light software enhancement curve into the frame relay so viewers in dark environments see clearly
+      if (isLowLight) {
+        ctx.filter = 'brightness(1.4) contrast(1.15) saturate(1.1)';
+      } else {
+        ctx.filter = 'none';
+      }
 
       ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
@@ -291,7 +450,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
           if (prevFrameDataRef.current) {
             let diffCount = 0;
-            const step = 16; // Sample pixels for speed
+            const step = 16;
             for (let i = 0; i < imgData.length; i += 4 * step) {
               const diffR = Math.abs(imgData[i] - prevFrameDataRef.current[i]);
               const diffG = Math.abs(imgData[i + 1] - prevFrameDataRef.current[i + 1]);
@@ -329,13 +488,18 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     return () => {
       if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     };
-  }, [isMotionAlertActive, roomId, viewersCount]);
+  }, [isLowLight, isMotionAlertActive, roomId, viewersCount]);
 
   // Switch between front and back camera
   const toggleCameraFacing = async () => {
     const nextFacing: CameraFacing = facing === 'user' ? 'environment' : 'user';
     setFacing(nextFacing);
-    await startCameraStream(nextFacing, selectedQuality, !isMuted);
+    await startCameraStream(nextFacing, selectedQuality, !isMuted, isLowLight);
+  };
+
+  // Toggle Low Light Mode
+  const toggleLowLight = () => {
+    applyLowLightSettings(!isLowLight);
   };
 
   // Toggle Torch/Flashlight
@@ -358,6 +522,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
             roomId,
             cameraFacing: facing,
             isTorchOn: nextTorch,
+            isLowLight,
           })
         );
       }
@@ -374,17 +539,16 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       audioTrack.enabled = !audioTrack.enabled;
       setIsMuted(!audioTrack.enabled);
     } else {
-      // Re-initialize with mic
       const nextMuted = !isMuted;
       setIsMuted(nextMuted);
-      startCameraStream(facing, selectedQuality, !nextMuted);
+      startCameraStream(facing, selectedQuality, !nextMuted, isLowLight);
     }
   };
 
   // Switch Quality
   const handleQualityChange = (newQuality: StreamQuality) => {
     setSelectedQuality(newQuality);
-    startCameraStream(facing, newQuality, !isMuted);
+    startCameraStream(facing, newQuality, !isMuted, isLowLight);
   };
 
   // Fullscreen
@@ -410,6 +574,10 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
     const ctx = snapCanvas.getContext('2d');
     if (!ctx) return;
 
+    if (isLowLight) {
+      ctx.filter = 'brightness(1.35) contrast(1.15) saturate(1.1)';
+    }
+
     if (facing === 'user') {
       ctx.translate(snapCanvas.width, 0);
       ctx.scale(-1, 1);
@@ -425,13 +593,11 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
   // Video recording
   const toggleRecording = () => {
     if (isRecording) {
-      // Stop recording
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       }
       setIsRecording(false);
     } else {
-      // Start recording
       if (!stream) return;
       recordedChunksRef.current = [];
       try {
@@ -479,6 +645,12 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {
+      const input = document.createElement('input');
+      input.value = shareUrl;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     }
@@ -525,8 +697,16 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           </span>
         </div>
 
-        {/* Viewers & WiFi Status */}
+        {/* Viewers, Low Light & WiFi Status */}
         <div className="flex items-center gap-2.5">
+          {/* Low Light Indicator Tag */}
+          {isLowLight && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-semibold animate-pulse">
+              <Moon className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Low Light Mode</span>
+            </div>
+          )}
+
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700 text-xs text-slate-200">
             <Users className="w-3.5 h-3.5 text-cyan-400" />
             <span className="font-semibold">{viewersCount}</span>
@@ -555,13 +735,33 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
         {/* Hidden Canvas for Frame Processing */}
         <canvas ref={canvasRef} className="hidden" />
 
+        {/* Camera Error Prompt */}
+        {cameraError ? (
+          <div className="absolute inset-0 z-30 flex flex-col items-center justify-center p-6 text-center bg-slate-950/95 backdrop-blur-md">
+            <div className="p-3.5 rounded-2xl bg-red-500/10 text-red-400 border border-red-500/20 mb-3">
+              <AlertCircle className="w-8 h-8" />
+            </div>
+            <h3 className="text-base font-bold text-white mb-1">Camera Initialization Issue</h3>
+            <p className="text-xs text-slate-400 max-w-md mb-4">{cameraError}</p>
+            <button
+              onClick={() => startCameraStream(facing, selectedQuality, !isMuted, isLowLight)}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Retry Camera
+            </button>
+          </div>
+        ) : null}
+
         {/* Video Element */}
         <video
           ref={videoRef}
           playsInline
           autoPlay
           muted
-          className={`w-full h-full object-contain ${facing === 'user' ? 'scale-x-[-1]' : ''}`}
+          className={`w-full h-full object-contain transition-all duration-300 ${
+            facing === 'user' ? 'scale-x-[-1]' : ''
+          } ${isLowLight ? 'brightness-125 contrast-110 saturate-110' : ''}`}
         />
 
         {/* Motion Alert Flash Overlay */}
@@ -582,17 +782,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           </div>
         )}
 
-        {/* HUD Top Left Stats */}
-        <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
-          <div className="px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-slate-300">
-            {fps} FPS
-          </div>
-          <div className="px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-cyan-300 uppercase">
-            {facing === 'user' ? 'Front' : 'Back'} Cam
-          </div>
-        </div>
-
-        {/* Quick Lens Switcher Pill Floating in Viewfinder */}
+        {/* HUD Top Left Lens Switcher Pill */}
         <div className="absolute top-4 left-4 z-10 hidden sm:flex items-center gap-1.5 p-1 bg-slate-900/80 backdrop-blur-md border border-slate-700/80 rounded-2xl">
           <button
             onClick={() => {
@@ -622,18 +812,70 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           </button>
         </div>
 
+        {/* HUD Top Right Stats & Audio VU */}
+        <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
+          {!isMuted && (
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] text-emerald-300"
+              title="Mic Audio Level"
+            >
+              <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+              <div className="w-12 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-400 transition-all duration-75"
+                  style={{ width: `${audioLevel}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-slate-300">
+            {fps} FPS
+          </div>
+          <div className="px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-cyan-300 uppercase">
+            {facing === 'user' ? 'Front' : 'Back'} Cam
+          </div>
+        </div>
+
         {/* Viewfinder Bottom Controls Bar */}
-        <div className="absolute bottom-4 inset-x-4 z-20 flex items-center justify-between gap-3 p-2.5 bg-slate-950/80 backdrop-blur-lg border border-slate-800/80 rounded-2xl">
-          {/* Left Actions: Switch Camera & Torch */}
-          <div className="flex items-center gap-2">
+        <div className="absolute bottom-4 inset-x-4 z-20 flex items-center justify-between gap-2 p-2.5 bg-slate-950/85 backdrop-blur-lg border border-slate-800/80 rounded-2xl">
+          {/* Left Actions: Switch Camera, Low Light, Torch, Audio */}
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <button
               onClick={toggleCameraFacing}
               title={`Switch to ${facing === 'user' ? 'Back' : 'Front'} Camera`}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition cursor-pointer"
             >
               <FlipHorizontal className="w-4 h-4 text-cyan-400" />
-              <span className="hidden sm:inline">
+              <span className="hidden md:inline">
                 {facing === 'user' ? 'Switch to Back' : 'Switch to Front'}
+              </span>
+            </button>
+
+            {/* LOW LIGHT TOGGLE BUTTON (Exposure / ISO adjustment) */}
+            <button
+              onClick={toggleLowLight}
+              title={
+                isLowLight
+                  ? 'Disable Low Light Mode'
+                  : 'Enable Low Light Mode (Boosts exposure & ISO for dim environments)'
+              }
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                isLowLight
+                  ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow-md shadow-amber-500/20'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+              }`}
+            >
+              <Moon
+                className={`w-4 h-4 ${isLowLight ? 'text-amber-400 animate-spin-slow' : 'text-slate-400'}`}
+              />
+              <span className="hidden sm:inline">Low Light</span>
+              <span
+                className={`text-[9px] px-1 py-0.2 rounded ${
+                  isLowLight ? 'bg-amber-500 text-black font-extrabold' : 'bg-slate-700 text-slate-300'
+                }`}
+              >
+                {isLowLight ? 'ON' : 'OFF'}
               </span>
             </button>
 
@@ -665,7 +907,7 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
           </div>
 
           {/* Center Actions: Snapshot & Record */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             <button
               onClick={takeSnapshot}
               title="Capture High-Res Photo"
@@ -677,26 +919,40 @@ export const CameraViewfinder: React.FC<CameraViewfinderProps> = ({
             <button
               onClick={toggleRecording}
               title={isRecording ? 'Stop Recording' : 'Start Video Recording'}
-              className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-xs font-bold transition transform active:scale-95 cursor-pointer ${
+              className={`flex items-center gap-2 px-3.5 py-2.5 rounded-full text-xs font-bold transition transform active:scale-95 cursor-pointer ${
                 isRecording
                   ? 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-500/40 animate-pulse'
                   : 'bg-slate-800 hover:bg-slate-700 text-red-400 border border-slate-700'
               }`}
             >
               <CircleDot className="w-4 h-4 text-red-500" />
-              <span>{isRecording ? 'Stop Recording' : 'Record Clip'}</span>
+              <span className="hidden sm:inline">
+                {isRecording ? 'Stop Recording' : 'Record Clip'}
+              </span>
             </button>
           </div>
 
-          {/* Right Actions: Quality & Fullscreen */}
-          <div className="flex items-center gap-2">
+          {/* Right Actions: Motion Detection, Quality & Fullscreen */}
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <button
+              onClick={() => setIsMotionAlertActive(!isMotionAlertActive)}
+              title={isMotionAlertActive ? 'Disable Motion Alert' : 'Enable Motion Alert'}
+              className={`p-2 rounded-xl text-xs border transition cursor-pointer hidden sm:block ${
+                isMotionAlertActive
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-700'
+              }`}
+            >
+              <Activity className="w-4 h-4" />
+            </button>
+
             <select
               value={selectedQuality.id}
               onChange={(e) => {
                 const q = QUALITY_PRESETS.find((p) => p.id === e.target.value);
                 if (q) handleQualityChange(q);
               }}
-              className="bg-slate-800 text-slate-300 text-xs rounded-xl px-2.5 py-2 border border-slate-700 outline-none cursor-pointer hidden md:block"
+              className="bg-slate-800 text-slate-300 text-xs rounded-xl px-2 py-2 border border-slate-700 outline-none cursor-pointer hidden md:block"
             >
               {QUALITY_PRESETS.map((p) => (
                 <option key={p.id} value={p.id} className="bg-slate-900 text-white">
